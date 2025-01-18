@@ -4,6 +4,7 @@ import xarray as xr
 from typing import Tuple, Optional
 import warnings
 from scipy.interpolate import RegularGridInterpolator
+import torch
 
 class WindFieldDataGenerator:
     '''
@@ -21,8 +22,6 @@ class WindFieldDataGenerator:
             dt: time step for integration
             n_steps: number of steps to integrate for each trajectory
         """
-        self.lats = lats  # [-90, 90]
-        self.lons = lons  # [0, 360]
         self.u_wind = u_wind
         self.v_wind = v_wind
         self.dt = dt
@@ -42,48 +41,81 @@ class WindFieldDataGenerator:
             fill_value=None
         )
 
-    def _get_wind_at_point(self, lat, lon):
-        lon = lon % 360
-        pos = np.array([[lat, lon]])
+    def _get_wind_at_points(self, lats: np.ndarray, lons: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        lons = lons % 360
+        pos = np.stack([lats, lons], axis=-1)
         return (
-            float(self.u_interp(pos)),
-            float(self.v_interp(pos))
+            self.u_interp(pos),
+            self.v_interp(pos)
         )
     
     
-    def generate_trajectory(self, lat, lon):
+    def generate_trajectory(self, lat: np.ndarray, lon: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Generate a single trajectory starting from given lat/lon.
+        Generate trajectories starting from given lat/lon arrays.
+        lat: (batch_size, 1)
+        lon: (batch_size, 1)
+        
         Uses RK4 integration for better accuracy.
         Return only start and end points
+        
+        Args:
+            lat: Starting latitude array
+            lon: Starting longitude array
+            
+        Returns:
+            Tuple of (start_points, end_points) where each is a batch of (lat,lon) pairs
         """
-
+        # Cast inputs to float numpy arrays
+        lat = np.array(lat, dtype=np.float32)
+        lon = np.array(lon, dtype=np.float32)
+        
+        batch_size = len(lat)
+        
         # Initialize trajectory
-        current_lat = lat
-        current_lon = lon
+        current_lats = lat
+        current_lons = lon % 360
         
         # Integrate forward
         for _ in range(self.n_steps):
-            dlat, dlon = self._rk4_step(current_lat, current_lon)
-            current_lat += dlat
-            current_lon += dlon
-            current_lat, current_lon = self._wrap_lat_lon(current_lat, current_lon)
-        return (lat, lon), (current_lat, current_lon)
+            dlats, dlons = self._rk4_step(current_lats, current_lons)
+            current_lats += dlats
+            current_lons += dlons
+            current_lats, current_lons = self._wrap_lat_lon(current_lats, current_lons)
+            
+        start_points = np.stack([lat, lon % 360], axis=-1) # (batch_size, 2)
+        end_points = np.stack([current_lats, current_lons], axis=-1) # (batch_size, 2)
 
-    def _wrap_lat_lon(self, lat, lon):
+        # Normalize trajectory to be between 0 and 1. Lats are between -90 and 90, lons are between 0 and 360
+        start_points[:, 0] = (start_points[:, 0] + 90) / 180
+        start_points[:, 1] = (start_points[:, 1]) / 360
+        end_points[:, 0] = (end_points[:, 0] + 90) / 180
+        end_points[:, 1] = (end_points[:, 1]) / 360
+        
+        return start_points, end_points
+
+    def _wrap_lat_lon(self, lats, lons):
+        '''
+        Note that this is completely incorrect and does not represent the real world. 
+
+        '''
         # Clip longitude to be within 0 and 360
-        lon = np.clip(lon, 0, 360)
-        # Wrap longitude around the globe
-        # lon = lon % 360
+        lons = np.clip(lons, 0, 360)
+        # Clip latitude to be within -90 and 90
+        lats = np.clip(lats, -90, 90)
+        return lats, lons
 
-        # Wrap latitude around the globe
-        if lat > 90:
-            lat = 180 - lat
-        elif lat < -90:
-            lat = -180 - lat
-        return lat, lon
+
+        # # Wrap latitude around the globe
+        # if lat > 90:
+        #     # lon = 360-lon
+        #     lat = 180 - lat
+        # elif lat < -90:
+        #     # lon = 360-lon
+        #     lat = -180 - lat
+        # return lat, lon
     
-    def generate_full_trajectory(self, start_lat, start_lon):
+    def generate_full_trajectory(self, start_lats: np.ndarray, start_lons: np.ndarray) -> np.ndarray:
         """
         Generate a full trajectory including intermediate points.
         
@@ -95,42 +127,60 @@ class WindFieldDataGenerator:
             trajectory: List of (lat, lon) pairs for entire trajectory
         """
 
-        trajectory = [(start_lat, start_lon % 360)]
-        current_lat = start_lat
-        current_lon = start_lon % 360
+        # Cast start_lats and start_lons to float numpy arrays
+        start_lats = np.array(start_lats, dtype=np.float32)
+        start_lons = np.array(start_lons, dtype=np.float32)
+
+        batch_size = len(start_lats)
+
+        trajectory = np.zeros((batch_size, self.n_steps + 1, 2))
+        trajectory[:, 0, :] = np.stack([start_lats, start_lons % 360], axis=-1)
+        current_lats = start_lats
+        current_lons = start_lons % 360
         
-        for _ in range(self.n_steps):
-            dlat, dlon = self._rk4_step(current_lat, current_lon)
-            current_lat += dlat
-            current_lon += dlon
-            current_lat, current_lon = self._wrap_lat_lon(current_lat, current_lon)
-            trajectory.append((current_lat, current_lon))
+        for t in range(self.n_steps):
+            dlats, dlons = self._rk4_step(current_lats, current_lons)
+            current_lats += dlats
+            current_lons += dlons
+            current_lats, current_lons = self._wrap_lat_lon(current_lats, current_lons)
+            trajectory[:, t+1, :] = np.stack([current_lats, current_lons], axis=-1)
         
+        # Normalize trajectory to be between -1 and 1. Lats are between -90 and 90, lons are between 0 and 360
+        trajectory[:, :, 0] = (trajectory[:, :, 0] + 90) / 180
+        trajectory[:, :, 1] = (trajectory[:, :, 1] + 180) / 360
         return np.array(trajectory)
     
-    def _rk4_step(self, lat, lon):
-        u1, v1 = self._get_wind_at_point(lat, lon)
+    def _rk4_step(self, lats, lons):
+        u1, v1 = self._get_wind_at_points(lats, lons)
         # These are derivatives, not steps --> remember to multiply by dt
-        k1_lat = v1
-        k1_lon = u1/np.cos(np.radians(lat))
+        k1_lats = v1
+        k1_lons = u1/np.cos(np.radians(lats))
 
-        u2, v2 = self._get_wind_at_point(lat + self.dt * k1_lat / 2 , lon + self.dt * k1_lon / 2)
-        k2_lat = v2
-        k2_lon = u2/np.cos(np.radians(lat + self.dt *  v1 / 2))
+        u2, v2 = self._get_wind_at_points(lats + self.dt * k1_lats / 2 , lons + self.dt * k1_lons / 2)
+        k2_lats = v2
+        k2_lons = u2/np.cos(np.radians(lats + self.dt *  v1 / 2))
 
-        u3, v3 = self._get_wind_at_point(lat + self.dt * k2_lat / 2 , lon + self.dt * k2_lon / 2)
-        k3_lat = v3
-        k3_lon = u3/np.cos(np.radians(lat + self.dt * k2_lat / 2))
+        u3, v3 = self._get_wind_at_points(lats + self.dt * k2_lats / 2 , lons + self.dt * k2_lons / 2)
+        k3_lats = v3
+        k3_lons = u3/np.cos(np.radians(lats + self.dt * k2_lats / 2))
 
-        u4, v4 = self._get_wind_at_point(lat + self.dt * k3_lat, lon +  self.dt * k3_lon)
-        k4_lat = v4
-        k4_lon = u4/np.cos(np.radians(lat + self.dt * k3_lat))
+        u4, v4 = self._get_wind_at_points(lats + self.dt * k3_lats, lons + self.dt * k3_lons)
+        k4_lats = v4
+        k4_lons = u4/np.cos(np.radians(lats + self.dt * k3_lats))
 
-        dlat = self.dt * (k1_lat + 2*k2_lat + 2*k3_lat + k4_lat) / 6
-        dlon = self.dt * (k1_lon + 2*k2_lon + 2*k3_lon + k4_lon) / 6
+        dlats = self.dt * (k1_lats + 2*k2_lats + 2*k3_lats + k4_lats) / 6
+        dlons = self.dt * (k1_lons + 2*k2_lons + 2*k3_lons + k4_lons) / 6
 
-        return dlat, dlon
+        return dlats, dlons
 
+    def generate_batch(self, batch_size: int, full:bool=False):
+        start_lats = np.arcsin(np.random.uniform(-1, 1, size=batch_size)) * (180/np.pi)
+        start_lons = np.random.uniform(0, 360, size=batch_size)
+        
+        if full:
+            return self.generate_full_trajectory(start_lats, start_lons)
+        else:
+            return self.generate_trajectory(start_lats, start_lons)
 
 def create_generator_from_grib(
     grib_path: str,
@@ -208,6 +258,10 @@ def create_generator_from_grib(
     print(f"Longitude range: [{float(ds.longitude.min())}, {float(ds.longitude.max())}]")
     
     return generator, ds
+
+
+
+
 
 if __name__ == "__main__":
     PATH = './data/gfs_4_20100808_1200_000.grb2'
