@@ -1,7 +1,7 @@
 # Flow Matching Project: Modeling Wind
 
 
-![Flow Matching Test](src/core/flow_matching_test.gif)
+<img src="src/core/flow_matching_test.gif" width="400">
 
 This project is based off the recently-published [Flow Matching Guide and Code](https://ai.meta.com/research/publications/flow-matching-guide-and-code/) from Meta. 
 
