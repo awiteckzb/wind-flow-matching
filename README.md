@@ -34,20 +34,20 @@ I then used RK4 approximation to generate trajectories from random initial posit
 
 Initial points are given by:
 $$
-\begin{align*}
-\text{lat} &= \text{arcsin}(2U-1) \times \frac{180}{\pi} \\
-\text{lon} &= U \times 360,
-\end{align*}
+
+\text{lat} = \text{arcsin}(2U-1) \times \frac{180}{\pi} \\
+\text{lon} = U \times 360,
+
 $$
 where $U$ is a random number drawn from a uniform distribution over (0,1).
 
 See [here](https://en.wikipedia.org/wiki/Runge%E2%80%93Kutta_methods) for the RK4 equations. One small note: since the data we're dealing with is the northward ($v$) and eastward ($u$) velocity, to calculate $\Delta\theta$ and $\Delta\lambda$ (the change in latitude and longitude) we need to convert the velocity to a change in position:
 
 $$
-\begin{align*}
-\Delta\theta &= \frac{v}{R} \\
-\Delta\lambda &= \frac{u}{R \cos(\theta)}
-\end{align*}
+
+\Delta\theta = \frac{v}{R} \\
+\Delta\lambda = \frac{u}{R \cos(\theta)}
+
 $$
 where $R$ is the radius of the Earth (I just used 1 here).
 
